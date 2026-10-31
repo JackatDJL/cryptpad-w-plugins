@@ -34,8 +34,8 @@ services:
       CPAD_MAIN_DOMAIN: https://pad.example.com
       CPAD_SANDBOX_DOMAIN: https://sandbox.pad.example.com
       CPAD_PLUGINS: sso,monitoring
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     volumes:
       - ./data/blob:/cryptpad/blob
       - ./data/block:/cryptpad/block
@@ -54,7 +54,9 @@ services:
         hard: 1000000
 ```
 
-Configure Dokploy's reverse proxy to send traffic to the container on port `3000`. The main and sandbox domains must be separate hostnames, and the environment values should be their public HTTPS origins. The wrapper generates the default `config/infra.js` with `httpHost: "0.0.0.0"`, so the app can be reached through its published container port. If you provide your own `config/infra.js`, set its `httpHost` to `0.0.0.0`; the wrapper leaves an existing file unchanged. The proxy remains responsible for exposing the public HTTPS hostnames and forwarding to the app.
+In Dokploy, configure the main and sandbox domains as separate HTTPS routes to service `cryptpad` on container port `3000`. Dokploy attaches its `dokploy-network` when Compose domains are configured; with a self-managed reverse proxy, make sure it shares a Docker network with CryptPad. Keep port `3000` internal: do not add a host-published `3000:3000` mapping, which could expose the unencrypted service outside the HTTPS proxy. See [Dokploy's Compose domains guide](https://docs.dokploy.com/docs/core/docker-compose/domains).
+
+The environment values should be the public HTTPS origins. The wrapper generates the default `config/infra.js` with `httpHost: "0.0.0.0"`, so the app can accept connections from the container network. If you provide your own `config/infra.js`, set its `httpHost` to `0.0.0.0`; the wrapper leaves an existing file unchanged.
 
 ### Persistent directories and read-only operation
 
@@ -68,7 +70,7 @@ The image includes SSO and monitoring, but neither is enabled automatically. Set
 
 ## Configure SSO
 
-When SSO is selected, configure `/cryptpad/config/sso.js` (persisted through the `./config` bind mount). The SSO `1.0.0` tag does not include a standalone `sso.example.js`; use the relevant OIDC or SAML sample from the [upstream SSO README](https://github.com/cryptpad/sso/blob/1.0.0/README.md#ssojs-sample-configurations) and fill in the provider URL, client ID/secret, or SAML certificate and key as applicable.
+When SSO is selected, configure `/cryptpad/config/sso.js` (persisted through the `./config` bind mount). The SSO `1.0.0` tag does not include a standalone `sso.example.js`; use the relevant OIDC or SAML sample from the [upstream SSO README](https://github.com/cryptpad/sso/blob/1.0.0/README.md#ssojs-sample-configurations) and fill in the provider URL, client ID/secret, or SAML certificate and key as applicable. The upstream examples contain explanatory annotations such as `(optional)` and `(deprecated)`, plus placeholder text; these are not JavaScript configuration. Remove the annotations and replace placeholders with real values before saving the file.
 
 For OIDC, configure this redirect URI with the identity provider:
 
@@ -80,7 +82,7 @@ Keep credential-bearing `sso.js` private and do not commit it. Restart CryptPad 
 
 ## First-start validation and troubleshooting
 
-- Confirm the image can be pulled and the service starts. The GHCR package must be public for an unauthenticated pull.
+- Confirm the image can be pulled and the service starts. The GHCR package must be public for an unauthenticated pull. On first start, inspect the service logs for CryptPad's one-time installation URL containing a unique token. After configuring the domains, open that URL and complete setup by creating the first administrator account; see the [CryptPad installation guide](https://docs.cryptpad.org/en/admin_guide/installation.html). Treat the tokenized URL as sensitive.
 - Check startup output for `cryptpad-plugin-wrapper` messages. A `staged plugin` message confirms activation; an `unknown plugin` warning means the requested name is not present in the image and was skipped.
 - If startup exits while preparing the default infra config, the wrapper could not set `httpHost` to `0.0.0.0` in the generated config. Check the image's expected `config.local/infra.example.js` source and configuration mount setup.
 - If a custom `config/infra.js` is present, verify that its `httpHost` is `0.0.0.0`; custom files are not rewritten by the wrapper.
