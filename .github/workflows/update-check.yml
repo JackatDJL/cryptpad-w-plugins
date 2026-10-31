@@ -1,0 +1,172 @@
+name: Check upstream versions
+
+on:
+  schedule:
+    - cron: '0 4 1,15 * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+  packages: read
+
+concurrency:
+  group: update-check-main
+  cancel-in-progress: false
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Read latest upstream versions
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          api=https://api.github.com
+          api_get() {
+            curl -fsSL --retry 3 --retry-delay 1 --retry-connrefused \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$1"
+          }
+          normalize_semver() {
+            value=$1
+            value=${value#version-}
+            value=${value#v}
+            printf '%s' "$value"
+          }
+
+          cpad_release=$(api_get "$api/repos/cryptpad/cryptpad/releases/latest")
+          cpad_tag=$(jq -er '.tag_name' <<< "$cpad_release")
+          cpad_version=$(normalize_semver "$cpad_tag")
+
+          sso_release=$(api_get "$api/repos/cryptpad/sso/releases/latest")
+          sso_tag=$(jq -er '.tag_name' <<< "$sso_release")
+          latest_sso=$(normalize_semver "$sso_tag")
+
+          monitor_release_file=$(mktemp)
+          monitor_status=$(curl -sS --retry 3 --retry-delay 1 --retry-connrefused \
+            -o "$monitor_release_file" -w '%{http_code}' \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api/repos/cryptpad/cryptpad-monitoring-plugin/releases/latest")
+
+          if [ "$monitor_status" = 200 ]; then
+            monitor_tag=$(jq -er '.tag_name' "$monitor_release_file")
+            monitor_ref=$(api_get "$api/repos/cryptpad/cryptpad-monitoring-plugin/commits/${monitor_tag}" | jq -er '.sha')
+            monitor_source=release
+          elif [ "$monitor_status" = 404 ]; then
+            echo 'No monitoring release exists; using the default branch commit and package version.'
+            default_branch=$(api_get "$api/repos/cryptpad/cryptpad-monitoring-plugin" | jq -er '.default_branch')
+            monitor_ref=$(api_get "$api/repos/cryptpad/cryptpad-monitoring-plugin/commits/${default_branch}" | jq -er '.sha')
+            monitor_source=default-branch
+          else
+            echo "Monitoring release lookup failed with HTTP ${monitor_status}." >&2
+            cat "$monitor_release_file" >&2
+            exit 1
+          fi
+          rm -f "$monitor_release_file"
+
+          monitor_package=$(api_get "https://raw.githubusercontent.com/cryptpad/cryptpad-monitoring-plugin/${monitor_ref}/package.json")
+          monitor_version=$(jq -er '.version' <<< "$monitor_package")
+          cpad_tag="version-${cpad_version}"
+          cpad_key=$cpad_tag
+          compatible_sso=$(jq -er --arg key "$cpad_key" '.sso_compat[$key] // empty' versions.json || true)
+
+          echo "Latest upstreams: CryptPad=${cpad_version}, SSO=${latest_sso}, monitoring=${monitor_version} (${monitor_source}, ${monitor_ref})."
+          if [ -z "$compatible_sso" ]; then
+            title="Compatibility check needed for CryptPad ${cpad_version}"
+            body=$(printf '%s\n' \
+              "The latest CryptPad release has no documented SSO compatibility pair in versions.json (sso_compat). No pins were changed and no image build was dispatched." \
+              "" \
+              "Latest upstreams observed by the scheduled checker:" \
+              "- CryptPad: ${cpad_version} (release tag ${cpad_tag}; official image tag version-${cpad_version})" \
+              "- SSO: ${latest_sso} (release tag ${sso_tag})" \
+              "- Monitoring: ${monitor_version} (${monitor_source}; immutable ref ${monitor_ref})" \
+              "" \
+              "Check the CryptPad release notes for the matching SSO plugin version, then update sso_compat in versions.json. Do not auto-build an unverified compatibility pair.")
+            open_issues=$(gh api "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100")
+            if jq -e --arg title "$title" 'any(.[]; .title == $title)' <<< "$open_issues" >/dev/null; then
+              echo "An open compatibility issue already exists: ${title}"
+            else
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/issues" \
+                -f title="$title" \
+                -f body="$body"
+              echo "Opened compatibility issue: ${title}"
+            fi
+            echo 'safe=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "safe=true" >> "$GITHUB_OUTPUT"
+          echo "cpad_version=${cpad_tag}" >> "$GITHUB_OUTPUT"
+          echo "sso_version=${compatible_sso}" >> "$GITHUB_OUTPUT"
+          echo "monitor_version=${monitor_version}" >> "$GITHUB_OUTPUT"
+          echo "monitor_ref=${monitor_ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Update pins and commit bump list
+        id: bump
+        if: steps.latest.outputs.safe == 'true'
+        env:
+          CPAD_VERSION: ${{ steps.latest.outputs.cpad_version }}
+          SSO_VERSION: ${{ steps.latest.outputs.sso_version }}
+          MON_VERSION: ${{ steps.latest.outputs.monitor_version }}
+          MON_REF: ${{ steps.latest.outputs.monitor_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          old_cpad=$(jq -er '.cryptpad' versions.json)
+          old_sso=$(jq -er '.sso' versions.json)
+          old_mon=$(jq -er '.monitoring' versions.json)
+          old_ref=$(jq -er '.monitoring_ref' versions.json)
+
+          jq -S \
+            --arg cpad "$CPAD_VERSION" \
+            --arg sso "$SSO_VERSION" \
+            --arg mon "$MON_VERSION" \
+            --arg ref "$MON_REF" \
+            '.cryptpad = $cpad | .sso = $sso | .monitoring = $mon | .monitoring_ref = $ref' \
+            versions.json > versions.json.tmp
+          mv versions.json.tmp versions.json
+
+          bump_list=$(printf '%s\n' \
+            "CryptPad Docker tag: ${old_cpad} -> ${CPAD_VERSION}" \
+            "SSO (compatible pin): ${old_sso} -> ${SSO_VERSION}" \
+            "Monitoring package: ${old_mon} -> ${MON_VERSION}" \
+            "Monitoring ref: ${old_ref} -> ${MON_REF}")
+
+          if git diff --quiet -- versions.json; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            echo 'No version or ref changes.'
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add versions.json
+          git commit -m 'chore: update upstream version pins' -m "$bump_list"
+          git push origin HEAD:main
+          echo 'changed=true' >> "$GITHUB_OUTPUT"
+          echo "$bump_list"
+
+      - name: Dispatch image build
+        if: steps.latest.outputs.safe == 'true' && steps.bump.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # GITHUB_TOKEN pushes do not trigger another workflow; dispatch once after the commit.
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/build.yml/dispatches" \
+            -f ref=main
