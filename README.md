@@ -2,6 +2,9 @@
 
 This image is based on the official CryptPad container and ships the upstream SSO plugin (OIDC/SAML) and Prometheus monitoring plugin; both are disabled unless selected with the comma-separated `CPAD_PLUGINS` environment variable. At startup the wrapper copies only the requested plugins from the image's immutable staging store into `/cryptpad/lib/plugins` before handing control to CryptPad.
 
+For a standalone setup walkthrough, see the [deployment guide](docs/deployment.md).
+For instructions on adding or updating plugins, see the [plugin maintainer guide](docs/plugins.md).
+
 ## Version matrix and image tags
 
 `versions.json` is the source of truth. Its CryptPad value is the exact Docker Hub tag; the build workflow passes these pins to the Dockerfile.
