@@ -2,6 +2,9 @@
 
 This image is based on the official CryptPad container and ships the upstream SSO plugin (OIDC/SAML) and Prometheus monitoring plugin; both are disabled unless selected with the comma-separated `CPAD_PLUGINS` environment variable. At startup the wrapper copies only the requested plugins from the image's immutable staging store into `/cryptpad/lib/plugins` before handing control to CryptPad.
 
+For a standalone setup walkthrough, see the [deployment guide](docs/deployment.md).
+For instructions on adding or updating plugins, see the [plugin maintainer guide](docs/plugins.md).
+
 ## Version matrix and image tags
 
 `versions.json` is the source of truth. Its CryptPad value is the exact Docker Hub tag; the build workflow passes these pins to the Dockerfile.
@@ -31,8 +34,8 @@ services:
       CPAD_MAIN_DOMAIN: https://pad.example.com
       CPAD_SANDBOX_DOMAIN: https://sandbox.pad.example.com
       CPAD_PLUGINS: sso,monitoring
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     volumes:
       - ./data/blob:/cryptpad/blob
       - ./data/block:/cryptpad/block
@@ -51,9 +54,11 @@ services:
         hard: 1000000
 ```
 
+In Dokploy, configure both domains to route to the `cryptpad` service on container port `3000`. The service should share a network with Dokploy's reverse proxy; Dokploy's Compose domain configuration attaches its `dokploy-network`. Do not publish `3000:3000` on the host, which would make the plain HTTP port reachable outside the HTTPS proxy. For a self-managed proxy, attach it and CryptPad to the same internal network and verify the host port is not published.
+
 The `/cryptpad/lib/plugins` tmpfs mount is required: it lets the non-root wrapper activate selected plugins in a read-only container. The plugin sources stay in `/cryptpad/plugins-store` in the image. Leave `CPAD_PLUGINS` unset or empty to start plain CryptPad; unknown names produce a warning and are skipped.
 
-Make the host directories used by the bind mounts writable by container UID/GID `4001:4001` before first start (especially `config`, `customize`, and the data directories). If you supply your own `config/infra.js`, set its `httpHost` to `0.0.0.0` so the published port can reach CryptPad. When that file is absent, the wrapper creates it from CryptPad's example with that network-bind setting; an existing custom file is left unchanged.
+Make the host directories used by the bind mounts writable by container UID/GID `4001:4001` before first start (especially `config`, `customize`, and the data directories). If you supply your own `config/infra.js`, set its `httpHost` to `0.0.0.0` so the reverse proxy can reach CryptPad over the container network. When that file is absent, the wrapper creates it from CryptPad's example with that network-bind setting; an existing custom file is left unchanged.
 
 ## Configure SSO
 
